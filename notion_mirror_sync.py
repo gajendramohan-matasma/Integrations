@@ -4,8 +4,8 @@ from notion_client import Client
 from notion_client.errors import APIResponseError
 from tenacity import retry, wait_exponential, stop_after_attempt
 
-# ========= Config: property names in BOTH DBs =========
-PROP_ACTIVITY     = "Activity"     # Title
+# ========= Config: property names (must match your Notion DBs) =========
+PROP_ACTIVITY     = "Activity"     # Title in both
 PROP_STATUS       = "Status"       # Status or Select in Master; any in Mirror
 PROP_START_DATE   = "Start Date"   # Date
 PROP_DUE_DATE     = "Due Date"     # Date
@@ -30,7 +30,6 @@ if not RAW_MASTER_DB_ID or not RAW_MIRROR_DB_ID:
     raise RuntimeError("MASTER_DB_ID and/or MIRROR_DB_ID are missing")
 
 notion = Client(auth=NOTION_TOKEN)
-
 
 # ========= Helpers: IDs, preflight, schema =========
 def parse_db_id(val: str) -> str:
@@ -57,7 +56,7 @@ def assert_db_access(db_id: str, label: str):
             f"[ERROR] Cannot access {label} ({obf(db_id)}). "
             f"HTTP {getattr(e, 'status', 'n/a')}: {getattr(e, 'message', str(e))}\n"
             f"Fix:\n"
-            f"• Use the DATABASE ID (not a view/page ID). URLs: use the part before ?v=...\n"
+            f"• Use the DATABASE ID (not a view/page ID). For URLs: use the part before ?v=...\n"
             f"• Share the DB with this integration (Share → Invite → your integration → Can edit)\n"
             f"• Ensure the token’s workspace matches the DB’s workspace"
         ) from e
@@ -83,6 +82,31 @@ def coerce_choice_payload(name: str | None, mirror_type: str):
         return {"status": ({"name": name} if name else None)}
     return None  # unsupported type
 
+def read_choice_name(prop):
+    """
+    Returns the 'name' for select/status values, or None if empty.
+    Works for a page property object like:
+      {"type": "select", "select": {... or None}}
+      {"type": "status", "status": {... or None}}
+    """
+    if not prop:
+        return None
+    t = prop.get("type")
+    if t in ("select", "status"):
+        val = prop.get(t)  # dict or None
+        return val.get("name") if isinstance(val, dict) else None
+    return None
+
+def read_people_names(prop):
+    """Returns list of display names (or IDs) from a People property; [] if empty."""
+    if not prop or prop.get("type") != "people":
+        return []
+    out = []
+    for u in prop.get("people", []):
+        nm = u.get("name") or u.get("id")
+        if nm:
+            out.append(nm)
+    return out
 
 # ========= Notion API wrappers =========
 @retry(wait=wait_exponential(multiplier=1, min=2, max=30), stop=stop_after_attempt(5))
@@ -99,7 +123,6 @@ def create_page(parent_db_id, properties):
 @retry(wait=wait_exponential(multiplier=1, min=2, max=30), stop=stop_after_attempt(5))
 def update_page(page_id, properties):
     return notion.pages.update(page_id=page_id, properties=properties)
-
 
 # ========= Page utilities =========
 def get_all_pages(db_id):
@@ -131,7 +154,6 @@ def build_mirror_index_by_activity(mirror_pages):
 def prop_or_none(page, name):
     return page.get("properties", {}).get(name)
 
-
 # ========= Property extraction / mapping =========
 def extract_sync_properties_from_master(master_page, mirror_schema_types: dict):
     """
@@ -145,18 +167,16 @@ def extract_sync_properties_from_master(master_page, mirror_schema_types: dict):
 
     # STATUS (Master may be select or status) -> Mirror's actual type
     if PROP_STATUS in mirror_schema_types:
-        st = prop_or_none(master_page, PROP_STATUS)
-        name = None
-        if st:
-            t = st.get("type")
-            if t == "select":
-                name = st.get("select", {}).get("name")
-            elif t == "status":
-                name = st.get("status", {}).get("name")
+        name = read_choice_name(prop_or_none(master_page, PROP_STATUS))
         if name in STATUS_MAP:
             name = STATUS_MAP[name]
-        payload = coerce_choice_payload(name, mirror_schema_types[PROP_STATUS])
-        if payload: props[PROP_STATUS] = payload
+        mt = mirror_schema_types[PROP_STATUS]
+        if mt == "status":
+            props[PROP_STATUS] = {"status": ({"name": name} if name else None)}
+        elif mt == "select":
+            props[PROP_STATUS] = {"select": ({"name": name} if name else None)}
+        elif mt == "multi_select":
+            props[PROP_STATUS] = {"multi_select": ([{"name": name}] if name else [])}
 
     # START DATE
     if PROP_START_DATE in mirror_schema_types:
@@ -170,52 +190,39 @@ def extract_sync_properties_from_master(master_page, mirror_schema_types: dict):
         if dd and dd.get("type") == "date" and mirror_schema_types[PROP_DUE_DATE] == "date":
             props[PROP_DUE_DATE] = {"date": dd.get("date")}
 
-    # PRIORITY (Select in Master; optional in Mirror)
+    # PRIORITY (Master: select; may be None; Mirror: select or multi-select or missing)
     if PROP_PRIORITY in mirror_schema_types:
-        pr = prop_or_none(master_page, PROP_PRIORITY)
-        name = pr.get("select", {}).get("name") if (pr and pr.get("type") == "select") else None
-        payload = coerce_choice_payload(name, mirror_schema_types[PROP_PRIORITY])
-        if payload: props[PROP_PRIORITY] = payload
+        name = read_choice_name(prop_or_none(master_page, PROP_PRIORITY))
+        mt = mirror_schema_types[PROP_PRIORITY]
+        if mt == "select":
+            props[PROP_PRIORITY] = {"select": ({"name": name} if name else None)}
+        elif mt == "multi_select":
+            props[PROP_PRIORITY] = {"multi_select": ([{"name": name}] if name else [])}
 
-    # RAISED BY (Select in Master) -> Mirror select or multi_select
+    # RAISED BY (Master: select) -> Mirror: select or multi_select
     if PROP_RAISED_BY in mirror_schema_types:
-        rb = prop_or_none(master_page, PROP_RAISED_BY)
-        name = rb.get("select", {}).get("name") if (rb and rb.get("type") == "select") else None
+        name = read_choice_name(prop_or_none(master_page, PROP_RAISED_BY))
         mt = mirror_schema_types[PROP_RAISED_BY]
         if mt == "multi_select":
             props[PROP_RAISED_BY] = {"multi_select": ([{"name": name}] if name else [])}
         elif mt == "select":
             props[PROP_RAISED_BY] = {"select": ({"name": name} if name else None)}
-        # else: unsupported type → skip
 
-    # ASSIGNED TO: People (MASTER) -> Select or Multi-select (MIRROR)
+    # ASSIGNED TO (Master: people) -> Mirror: select or multi_select
     if PROP_ASSIGNED_TO in mirror_schema_types:
-        at = prop_or_none(master_page, PROP_ASSIGNED_TO)
+        names = read_people_names(prop_or_none(master_page, PROP_ASSIGNED_TO))
         mt = mirror_schema_types[PROP_ASSIGNED_TO]
-        if at and at.get("type") == "people":
-            people = at.get("people", [])
-            names = []
-            for u in people:
-                nm = u.get("name") or u.get("id")
-                if nm:
-                    names.append(nm)
-            if mt == "multi_select":
-                props[PROP_ASSIGNED_TO] = {"multi_select": [{"name": n} for n in names]}
-            elif mt == "select":
-                first = names[0] if names else None
-                props[PROP_ASSIGNED_TO] = {"select": ({"name": first} if first else None)}
-        else:
-            # no people value in master; clear mirror multi/select
-            if mt == "multi_select":
-                props[PROP_ASSIGNED_TO] = {"multi_select": []}
-            elif mt == "select":
-                props[PROP_ASSIGNED_TO] = {"select": None}
+        if mt == "multi_select":
+            props[PROP_ASSIGNED_TO] = {"multi_select": [{"name": n} for n in names]}
+        elif mt == "select":
+            first = names[0] if names else None
+            props[PROP_ASSIGNED_TO] = {"select": ({"name": first} if first else None)}
+        # else: unsupported type -> skip
 
     return props
 
 def to_title_property(text):
     return {"title": [{"type": "text", "text": {"content": text or ""}}]}
-
 
 # ========= Main =========
 def main():
@@ -257,7 +264,6 @@ def main():
             print(f"Created: {activity}")
 
     print(f"Done. Created: {created}, Updated: {updated}, Skipped (no title): {skipped}")
-
 
 if __name__ == "__main__":
     main()
