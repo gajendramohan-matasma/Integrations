@@ -1,3 +1,29 @@
+- name: Verify Notion access (MASTER)
+  run: |
+    DB_ID_NO_DASHES="${MASTER_DB_ID//-/}"
+    echo "Checking MASTER_DB_ID length: ${#DB_ID_NO_DASHES}"
+    curl -sS -X POST "https://api.notion.com/v1/databases/${DB_ID_NO_DASHES}/query" \
+      -H "Authorization: Bearer $NOTION_TOKEN" \
+      -H "Notion-Version: 2022-06-28" \
+      -H "Content-Type: application/json" \
+      -d '{}' | jq '.object, .message // empty, .results | length'
+  env:
+    NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+    MASTER_DB_ID: ${{ secrets.MASTER_DB_ID }}   # or vars, wherever you keep it
+
+- name: Verify Notion access (MIRROR)
+  run: |
+    DB_ID_NO_DASHES="${MIRROR_DB_ID//-/}"
+    echo "Checking MIRROR_DB_ID length: ${#DB_ID_NO_DASHES}"
+    curl -sS -X POST "https://api.notion.com/v1/databases/${DB_ID_NO_DASHES}/query" \
+      -H "Authorization: Bearer $NOTION_TOKEN" \
+      -H "Notion-Version: 2022-06-28" \
+      -H "Content-Type: application/json" \
+      -d '{}' | jq '.object, .message // empty, .results | length'
+  env:
+    NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+    MIRROR_DB_ID: ${{ secrets.MIRROR_DB_ID }}
+
 from notion_client.errors import APIResponseError
 import re
 
