@@ -2,7 +2,7 @@ name: Notion Mirror Sync
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # every 30 min
+    - cron: "*/05 * * * *"   # every 5 min
   workflow_dispatch:          # manual
   push:
     branches: [ "main" ]
