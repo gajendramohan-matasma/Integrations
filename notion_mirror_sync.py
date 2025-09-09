@@ -46,8 +46,12 @@ def main():
     assert_db_access(mirror_db, "MIRROR_DB")
 
     print("Fetching Master and Mirror pages...")
+    def get_db_schema_types(db_id: str) -> dict:
+    info = notion.databases.retrieve(db_id)
+    props = info.get("properties", {})
+    return {name: meta.get("type") for name, meta in props.items()}
     # Use master_db/mirror_db variables instead of the constants below
-    mirror_schema_types = get_db_schema_types(MIRROR_DB_ID)
+
 
 
 
