@@ -1,0 +1,41 @@
+name: Notion Mirror Sync
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # every 30 min
+  workflow_dispatch:          # manual
+  push:
+    branches: [ "main" ]
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: notion-mirror-sync
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run sync
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          MASTER_DB_ID: ${{ secrets.MASTER_DB_ID }}
+          MIRROR_DB_ID: ${{ secrets.MIRROR_DB_ID }}
+        run: python notion_mirror_sync.py
