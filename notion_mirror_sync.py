@@ -1,3 +1,55 @@
+from notion_client.errors import APIResponseError
+import re
+
+def parse_db_id(val: str) -> str:
+    """Accept plain ID or full Notion URL; return hyphenated UUID."""
+    if not val:
+        return val
+    # Strip hyphens for detection, then re-hyphenate
+    m = re.search(r'([0-9a-f]{32})', val.replace('-', ''), re.I)
+    if not m:
+        return val  # let Notion error out; at least we tried to parse
+    raw = m.group(1).lower()
+    return f"{raw[0:8]}-{raw[8:12]}-{raw[12:16]}-{raw[16:20]}-{raw[20:32]}"
+
+def obf(s: str) -> str:
+    return (s[:4] + "..." + s[-4:]) if s and len(s) > 8 else ("set" if s else "EMPTY")
+
+def assert_db_access(db_id: str, label: str):
+    try:
+        info = notion.databases.retrieve(db_id)
+        name = "".join(t.get("plain_text","") for t in info.get("title", []))
+        print(f"[OK] {label}: {name!r} ({obf(db_id)})")
+    except APIResponseError as e:
+        raise RuntimeError(
+            f"[ERROR] Cannot access {label} ({obf(db_id)}). "
+            f"HTTP 404 usually means wrong ID or not shared.\n"
+            f"Fix:\n"
+            f"• Use the database ID (not view/page); if you pasted a full URL, store just the DB link or raw ID.\n"
+            f"• Share the DB with this integration in Notion.\n"
+            f"• Ensure token & DB are in the same workspace."
+        ) from e
+def main():
+    # Read envs and normalize IDs (handles full URLs too)
+    raw_master = os.environ.get("MASTER_DB_ID")
+    raw_mirror = os.environ.get("MIRROR_DB_ID")
+    if not os.environ.get("NOTION_TOKEN"):
+        raise RuntimeError("Missing NOTION_TOKEN")
+    if not raw_master or not raw_mirror:
+        raise RuntimeError("MASTER_DB_ID and/or MIRROR_DB_ID are missing")
+
+    master_db = parse_db_id(raw_master)
+    mirror_db = parse_db_id(raw_mirror)
+
+    print(f"Preflight… MASTER_DB_ID={obf(master_db)}  MIRROR_DB_ID={obf(mirror_db)}")
+    assert_db_access(master_db, "MASTER_DB")
+    assert_db_access(mirror_db, "MIRROR_DB")
+
+    print("Fetching Master and Mirror pages...")
+    # Use master_db/mirror_db variables instead of the constants below
+
+
+
 import os
 from notion_client import Client
 from tenacity import retry, wait_exponential, stop_after_attempt
