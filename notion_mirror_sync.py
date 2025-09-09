@@ -47,6 +47,8 @@ def main():
 
     print("Fetching Master and Mirror pages...")
     # Use master_db/mirror_db variables instead of the constants below
+    mirror_schema_types = get_db_schema_types(MIRROR_DB_ID)
+
 
 
 
@@ -66,6 +68,7 @@ PROP_DUE_DATE     = "Due Date"     # Date
 PROP_PRIORITY     = "Priority"     # Select
 PROP_RAISED_BY    = "Raised By"    # Select
 PROP_ASSIGNED_TO  = "Assigned To"  # People in MASTER -> Multi-select in MIRROR
+
 
 notion = Client(auth=NOTION_TOKEN)
 
@@ -122,10 +125,28 @@ def extract_sync_properties_from_master(master_page):
     props = {}
 
     # STATUS (select)
-    status_prop = prop_or_none(master_page, PROP_STATUS)
-    if status_prop and status_prop.get("type") == "select":
-        sel = status_prop.get("select")
-        props[PROP_STATUS] = {"select": {"name": sel["name"]}} if sel else {"select": None}
+    {"status": {"name": "<option>"}}
+    def get_db_schema_types(db_id: str) -> dict:
+    info = notion.databases.retrieve(db_id)
+    return {name: meta.get("type") for name, meta in info["properties"].items()}
+    # STATUS: read from Master (status or select), write to Mirror as its actual type
+if "Status" in mirror_schema_types:
+    st = prop_or_none(master_page, "Status")
+    name = None
+    if st:
+        t = st.get("type")
+        if t == "select":
+            name = st.get("select", {}).get("name")
+        elif t == "status":
+            name = st.get("status", {}).get("name")
+
+    mt = mirror_schema_types["Status"]  # "status", "select", or "multi_select"
+    if mt == "status":
+        props["Status"] = {"status": ({"name": name} if name else None)}
+    elif mt == "select":
+        props["Status"] = {"select": ({"name": name} if name else None)}
+    elif mt == "multi_select":
+        props["Status"] = {"multi_select": ([{"name": name}] if name else [])}
 
     # START DATE (date)
     sd_prop = prop_or_none(master_page, PROP_START_DATE)
