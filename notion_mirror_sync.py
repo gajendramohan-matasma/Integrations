@@ -13,11 +13,15 @@ PROP_PRIORITY     = "Priority"     # Select in Master; optional in Mirror
 PROP_RAISED_BY    = "Raised By"    # Select in Master
 PROP_ASSIGNED_TO  = "Assigned To"  # People in Master
 
-# Optional mapping if Master values differ from Mirror (esp. Status)
+# Map Master Status -> Mirror Status (use this to normalize names)
 STATUS_MAP = {
+    # "Planned": "To Do",     # <- example mapping; change to your Mirror option
     # "In progress": "In Progress",
     # "WIP": "In Progress",
 }
+
+# If a Status value still isn't valid after mapping, optionally fall back:
+STATUS_FALLBACK = None  # e.g., "To Do" or None to clear status when unknown
 
 # ========= Env / Client =========
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
@@ -66,6 +70,25 @@ def get_db_schema_types(db_id: str) -> dict:
     info = notion.databases.retrieve(db_id)
     props = info.get("properties", {})
     return {name: meta.get("type") for name, meta in props.items()}
+
+def get_db_schema_options(db_id: str) -> dict:
+    """
+    Return {prop_name: set(option_names)} for select/multi_select/status properties.
+    For other types, returns empty set.
+    """
+    info = notion.databases.retrieve(db_id)
+    props = info.get("properties", {})
+    out = {}
+    for name, meta in props.items():
+        t = meta.get("type")
+        opts = set()
+        if t in ("select", "multi_select", "status"):
+            for o in meta[t].get("options", []):
+                nm = o.get("name")
+                if nm:
+                    opts.add(nm)
+        out[name] = opts
+    return out
 
 def coerce_choice_payload(name: str | None, mirror_type: str):
     """
@@ -155,28 +178,42 @@ def prop_or_none(page, name):
     return page.get("properties", {}).get(name)
 
 # ========= Property extraction / mapping =========
-def extract_sync_properties_from_master(master_page, mirror_schema_types: dict):
+missing_status_names = set()
+
+def extract_sync_properties_from_master(master_page, mirror_schema_types: dict, mirror_allowed: dict):
     """
     Build properties for MIRROR from MASTER fields, adapting to Mirror schema:
     - Skips properties missing in Mirror
     - Chooses status/select/multi_select based on Mirror types
     - Assigned To: People (Master) -> Select or Multi-select (Mirror)
     - Raised By:  Select (Master)  -> Select or Multi-select (Mirror)
+    - For Status: validates against allowed options; maps or falls back/clears
     """
     props = {}
 
     # STATUS (Master may be select or status) -> Mirror's actual type
     if PROP_STATUS in mirror_schema_types:
         name = read_choice_name(prop_or_none(master_page, PROP_STATUS))
+        # Map first (normalize)
         if name in STATUS_MAP:
             name = STATUS_MAP[name]
+
         mt = mirror_schema_types[PROP_STATUS]
-        if mt == "status":
-            props[PROP_STATUS] = {"status": ({"name": name} if name else None)}
-        elif mt == "select":
-            props[PROP_STATUS] = {"select": ({"name": name} if name else None)}
-        elif mt == "multi_select":
-            props[PROP_STATUS] = {"multi_select": ([{"name": name}] if name else [])}
+        allowed = mirror_allowed.get(PROP_STATUS, set())
+
+        # If Mirror uses 'status', Notion can't auto-create options → validate
+        if mt == "status" and name is not None and name not in allowed:
+            # Try configured fallback if valid
+            if STATUS_FALLBACK and STATUS_FALLBACK in allowed:
+                name = STATUS_FALLBACK
+            else:
+                # Clear the value (avoid 400) and record the missing name
+                missing_status_names.add(name)
+                name = None
+
+        payload = coerce_choice_payload(name, mt)
+        if payload:
+            props[PROP_STATUS] = payload
 
     # START DATE
     if PROP_START_DATE in mirror_schema_types:
@@ -190,7 +227,7 @@ def extract_sync_properties_from_master(master_page, mirror_schema_types: dict):
         if dd and dd.get("type") == "date" and mirror_schema_types[PROP_DUE_DATE] == "date":
             props[PROP_DUE_DATE] = {"date": dd.get("date")}
 
-    # PRIORITY (Master: select; may be None; Mirror: select or multi-select or missing)
+    # PRIORITY (Master: select; Mirror: select or multi-select; Mirror may not have it)
     if PROP_PRIORITY in mirror_schema_types:
         name = read_choice_name(prop_or_none(master_page, PROP_PRIORITY))
         mt = mirror_schema_types[PROP_PRIORITY]
@@ -237,6 +274,7 @@ def main():
     master_pages = get_all_pages(master_db)
     mirror_pages = get_all_pages(mirror_db)
     mirror_schema_types = get_db_schema_types(mirror_db)
+    mirror_allowed = get_db_schema_options(mirror_db)
 
     mirror_index = build_mirror_index_by_activity(mirror_pages)
 
@@ -248,7 +286,7 @@ def main():
             skipped += 1
             continue
 
-        mirror_props = extract_sync_properties_from_master(mp, mirror_schema_types)
+        mirror_props = extract_sync_properties_from_master(mp, mirror_schema_types, mirror_allowed)
         mirror_id = mirror_index.get(activity.lower())
 
         if mirror_id:
@@ -262,6 +300,11 @@ def main():
             create_page(mirror_db, new_props)
             created += 1
             print(f"Created: {activity}")
+
+    if missing_status_names:
+        print("WARNING: These Status values were not present in the Mirror and were cleared or mapped:")
+        for s in sorted(missing_status_names):
+            print(f"  - {s!r}  (add in Mirror Status options or map via STATUS_MAP/STATUS_FALLBACK)")
 
     print(f"Done. Created: {created}, Updated: {updated}, Skipped (no title): {skipped}")
 
